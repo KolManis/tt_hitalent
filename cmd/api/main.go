@@ -3,32 +3,50 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/KolManis/tt_hitalent/internal/config"
+	"github.com/KolManis/tt_hitalent/internal/database"
+	"github.com/KolManis/tt_hitalent/internal/handlers"
+	"github.com/KolManis/tt_hitalent/pkg/middleware"
 )
 
 const (
-	httpPort = "8080"
-	//Таймауты для HTTP сервера
+	httpPort          = "8080"
 	readheaderTimeout = 5 * time.Second
 	shutdownTimeout   = 10 * time.Second
 )
 
-func foo(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "Привет! Это тестовый сервер.\n")
-	fmt.Fprintf(w, "Параметры запроса: %s\n", r.URL.Query())
-}
-
 func main() {
+
+	cfg := config.Load()
+
+	// Подключение к БД
+	db, err := database.Connect(cfg)
+
+	if err != nil {
+		log.Fatal("Failed to connect to database:", err)
+	}
+
+	if err := database.RunMigrations(db); err != nil {
+		log.Fatal("Failed to migrate database:", err)
+	}
+
+	chatHandler := handlers.NewChatHandler(db)
+	messageHandler := handlers.NewMessageHandler(db)
+
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/", foo)
+	mux.HandleFunc("POST /chats", chatHandler.CreateChat)
+	mux.HandleFunc("GET /chats/{id}", chatHandler.GetChat)
+	mux.HandleFunc("DELETE /chats/{id}", chatHandler.DeleteChat)
+
+	mux.HandleFunc("POST /chats/{id}/messages", messageHandler.CreateMessage)
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -36,9 +54,11 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
+	handler := middleware.Logger(mux)
+
 	server := &http.Server{
-		Addr:              net.JoinHostPort("localhost", httpPort),
-		Handler:           mux,
+		Addr:              ":" + httpPort,
+		Handler:           handler,
 		ReadHeaderTimeout: readheaderTimeout, // Защита от Slowloris
 		WriteTimeout:      10 * time.Second,  // Защита от медленной отправки
 	}
@@ -61,7 +81,7 @@ func main() {
 	defer cancel()
 
 	// новые соединения не будут создаваться, а старые мы завершаем в пределат timeout
-	err := server.Shutdown(ctx)
+	err = server.Shutdown(ctx)
 	if err != nil {
 		log.Printf("Ошибка при остановке сервера %v\n", err)
 	}
